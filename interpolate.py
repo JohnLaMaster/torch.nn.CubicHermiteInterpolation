@@ -12,9 +12,10 @@ import torch
 import torch.nn as nn
 
 
-__all__ = ['CubicHermiteSplines', 'CubicHermiteAkima', 'CubicHermiteMAkima', 
+__all__ = ['CubicHermiteSplines1d', 'CubicHermiteAkima1d', 'CubicHermiteMAkima1d', 
            'CubicHermiteSplines2d', 'CubicHermiteAkima2d', 'CubicHermiteMAkima2d',
-           'CubicHermiteSplines3d', 'CubicHermiteAkima3d', 'CubicHermiteMAkima3d']
+           'CubicHermiteSplines3d', 'CubicHermiteAkima3d', 'CubicHermiteMAkima3d',
+           'CubicHermiteSplines4d', 'CubicHermiteAkima4d', 'CubicHermiteMAkima4d']
 
 
 '''
@@ -24,7 +25,7 @@ the x-direction and then the y-direction.
 '''
 
 
-class CubicHermite(nn.Module):
+class CubicHermite1d(nn.Module):
     def __init__(self, 
                  xaxis: torch.Tensor, 
                  signal: torch.Tensor):
@@ -77,7 +78,7 @@ class CubicHermite(nn.Module):
 
     
     
-class CubicHermiteSplines(CubicHermite):
+class CubicHermiteSplines1d(CubicHermite1d):
     def __init__(self, 
                  xaxis: torch.Tensor, 
                  signal: torch.Tensor):
@@ -85,7 +86,7 @@ class CubicHermiteSplines(CubicHermite):
         self.m = torch.cat([self.m[...,0].unsqueeze(-1), (self.m[...,1:] + self.m[...,:-1]) / 2, self.m[...,-1].unsqueeze(-1)], dim=-1)
     
     
-class CubicHermiteAkima(CubicHermite):
+class CubicHermiteAkima1d(CubicHermite1d):
     '''
     Cubic Hermite Modified Akima Interpolation
     https://blogs.mathworks.com/cleve/2019/04/29/makima-piecewise-cubic-interpolation/
@@ -118,7 +119,7 @@ class CubicHermiteAkima(CubicHermite):
         self.m[(weights12==0)] = 0.
     
     
-class CubicHermiteMAkima(CubicHermite):
+class CubicHermiteMAkima1d(CubicHermite1d):
     '''
     Cubic Hermite Modified Akima Interpolation
     https://blogs.mathworks.com/cleve/2019/04/29/makima-piecewise-cubic-interpolation/
