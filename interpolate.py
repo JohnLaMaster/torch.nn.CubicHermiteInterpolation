@@ -162,14 +162,13 @@ class CubicHermite2d(nn.Module):
                  signal: torch.Tensor):
         super().__init__()
         self.device = signal.device
+        for _ in range(signal.ndim - yaxis.ndim): yaxis = yaxis.unsqueeze(-1)
         for _ in range(signal.ndim - xaxis.ndim): xaxis = xaxis.unsqueeze(0)
-        for _ in range(signal.ndim - yaxis.ndim): yaxis = yaxis.unsqueeze(0)
-        self.x1 = xaxis.expand_as(signal).to(self.device).contiguous()
-        self.x2 = yaxis.expand_as(signal).to(self.device).contiguous()
-        self.y = signal.contiguous()
-        self.m1 = (signal[...,1:] - signal[...,:-1]) / (self.x1[...,1:] - self.x1[...,:-1])
-        signal = signal.transpose(-2,-1)
-        self.m2 = (signal[...,1:] - signal[...,:-1]) / (self.x2[...,1:] - self.x2[...,:-1])
+        self.x = xaxis.expand_as(signal).to(self.device).contiguous()
+        self.y = yaxis.expand_as(signal).to(self.device).contiguous()
+        self.data = signal.contiguous()
+        self.m_x = (signal[...,1:,:] - signal[...,:-1,:]) / (self.x[...,1:,:] - self.x[...,:-1,:])
+        self.m_y = (signal[...,1:] - signal[...,:-1]) / (self.y[...,1:] - self.y[...,:-1])
 
     @staticmethod
     def h_poly_helper(tt):
@@ -193,29 +192,47 @@ class CubicHermite2d(nn.Module):
             tt[...,i,:] = tt[...,i-1,:].clone() * t
         return self.h_poly_helper(tt)
 
-    def interp1d(self, input, x0, m, xs):
-        size, size0 = list([i for i in x0.shape]), list([1 for _ in range(x0.ndim)])
-        for _ in range(x0.ndim - xs.ndim): xs = xs.unsqueeze(0)
-        for i in range(2, xs.ndim-1): size0[i] = xs.shape[i]
-        size[-1] = -1
+    def interp(self, 
+               xs: torch.Tensor,
+               ys: torch.Tensor) -> torch.Tensor:
+        size   = list([i for i in self.x.shape])
+        size_x = list([1 for _ in range(self.x.ndim)])
+        size_y = list([1 for _ in range(self.y.ndim)])
+        for _ in range(self.x.ndim - xs.ndim): xs = xs.unsqueeze(0)
+        for _ in range(self.y.ndim - ys.ndim): ys = ys.unsqueeze(-1)
+        for i in range(2, xs.ndim): size_x[i] = xs.shape[i-1]
+        for i in range(2, ys.ndim): size_y[i] = ys.shape[i-2]
+        size[-1], size[-2] = -1, -1
            
         xs = xs.expand(size).contiguous()
-        I  = torch.searchsorted(x0[...,1:-1].contiguous(), xs.contiguous()).repeat(size0)
+        ys = ys.expand(size).contiguous()
 
-        x  = torch.gather(x0, -1, I)
-        dx = torch.gather(x0, -1, I+1) - x
+        I_x = torch.searchsorted(self.x[...,1:-1,:].contiguous(), xs.contiguous()).repeat(size_x)
+        I_y = torch.searchsorted(self.y[...,:,1:-1].contiguous(), ys.contiguous()).repeat(size_y)
+
+        x  = torch.gather(self.x, -1, I_x)
+        dx = torch.gather(self.x, -1, I_x+1) - x
         
-        hh = self.h_poly((xs - x)/dx)
-            
-        return hh[...,0,:]*torch.gather(input,-1,I)   + hh[...,1,:]*torch.gather(m,-1,I)*dx + \
-               hh[...,2,:]*torch.gather(input,-1,I+1) + hh[...,3,:]*torch.gather(m,-1,I+1)*dx
+        y  = torch.gather(self.y, -1, I_y)
+        dy = torch.gather(self.y, -1, I_y+1) - y
 
-    def interp(self, 
-               xs: torch.Tensor, 
-               ys: torch.Tensor) -> torch.Tensor:
-        out = self.interp1d(self.y, self.x1, self.m1, xs).transpose(-2,-1)
-        return self.interp1d(out, self.x2, self.m2, ys).transpose(-2,-1)
+        u = (xs - x) / dx
+        v = (ys - y) / dy
 
+        h = torch.stack([self.h_poly(1 + 2*u) * (1 - u)**2, 
+                         self.h_poly(u) * dx * (1 - u), 
+                         self.h_poly(1 + 2*u - 2*v) * (1 - u)**2, 
+                         self.h_poly(u - v) * dx * (1 - u)], dim=-3)
+
+        I_y = I_y.unsqueeze(-1).unsqueeze(-1).repeat(1, 1, self.m_y.shape[-1])
+        I_x = I_x.unsqueeze(-1).unsqueeze(-1).repeat(1, 1, self.m_x.shape[-2], 1)
+           
+        m = torch.stack([torch.gather(self.m_y, -2, I_y), 
+                         torch.gather(self.m_y, -2, I_y+1), 
+                         torch.gather(self.m_x, -1, I_x), 
+                         torch.gather(self.m_x, -1, I_x+1)], dim=-3)
+
+        return torch.einsum('ijklmn,ijkln->ijkmn', h, m).squeeze(-3)
     
     
 class CubicHermiteSplines2d(CubicHermite2d):
@@ -302,6 +319,112 @@ class CubicHermiteMAkima2d(CubicHermite2d):
         return m
 
     
+    
+# class CubicHermite3d(nn.Module):
+#     '''
+#     Based on code above.
+#     Written by: Ing. John T LaMaster, June 2022
+#     Updated: May 2023
+#     '''
+#     def __init__(self, 
+#                  xaxis: torch.Tensor, 
+#                  yaxis: torch.Tensor, 
+#                  zaxis: torch.Tensor, 
+#                  signal: torch.Tensor):
+#         super().__init__()
+#         self.device = signal.device
+        
+#         assert(xaxis.ndim == yaxis.ndim & yaxis.ndim == zaxis.ndim)
+#         if xaxis.ndim==2:
+#             xaxis = xaxis.unsqueeze(-1).unsqueeze(-1)
+#             yaxis = yaxis.unsqueeze(0).unsqueeze(-1)
+#             zaxis = zaxis.unsqueeze(0).unsqueeze(0)
+        
+#         for _ in range(signal.ndim - xaxis.ndim): 
+#             xaxis = xaxis.unsqueeze(0)
+#             yaxis = yaxis.unsqueeze(0)
+#             zaxis = zaxis.unsqueeze(0)
+            
+#         self.x = xaxis.expand_as(signal).to(self.device).contiguous()
+#         self.y = yaxis.expand_as(signal).to(self.device).contiguous()
+#         self.z = zaxis.expand_as(signal).to(self.device).contiguous()
+#         self.data = signal.contiguous()
+        
+#         self.m_x = (signal[...,1:,:,:] - signal[...,:-1,:,:]) / (self.x[...,1:,:,:] - self.x[...,:-1,:,:])
+#         self.m_y = (signal[...,:,1:,:] - signal[...,:,:-1,:]) / (self.y[...,:,1:,:] - self.y[...,:,:-1,:])
+#         self.m_z = (signal[...,1:,:,:] - signal[...,:,:,:-1]) / (self.z[...,:,:,1:] - self.z[...,:,:,:-1])
+
+#     @staticmethod
+#     def h_poly_helper(tt):
+#         out = torch.empty_like(tt)
+#         A = torch.tensor([
+#                           [1, 0, -3,  2],
+#                           [0, 1, -2,  1],
+#                           [0, 0,  3, -2],
+#                           [0, 0, -1,  1]
+#                          ], dtype=tt[-1].dtype, device=tt.device)
+
+#         for r in range(4):
+#             out[...,r,:] = A[r,0] * tt[...,0,:] + A[r,1] * tt[...,1,:] + \
+#                            A[r,2] * tt[...,2,:] + A[r,3] * tt[...,3,:]
+#         return out
+
+#     def h_poly(self, t):
+#         tt = torch.empty_like(t).unsqueeze(-2).repeat_interleave(4, dim=-2).to(self.device)
+#         tt[...,0,:] = torch.ones_like(tt[...,0,:])
+#         for i in range(1, 4):
+#             tt[...,i,:] = tt[...,i-1,:].clone() * t
+#         return self.h_poly_helper(tt)
+
+#     def interp(self, 
+#                xs: torch.Tensor,
+#                ys: torch.Tensor) -> torch.Tensor:
+#         size   = list([i for i in self.x.shape])
+#         size_x = list([1 for _ in range(self.x.ndim)])
+#         size_y = list([1 for _ in range(self.y.ndim)])
+#         size_z = list([1 for _ in range(self.z.ndim)])
+#         for _ in range(self.x.ndim - xs.ndim): xs = xs.unsqueeze(0)
+#         for _ in range(self.y.ndim - ys.ndim): ys = ys.unsqueeze(-1)
+#         for _ in range(self.z.ndim - zs.ndim): zs = zs.unsqueeze(-1)
+#         for i in range(2, xs.ndim): size_x[i] = xs.shape[i-1]
+#         for i in range(2, ys.ndim): size_y[i] = ys.shape[i-2]
+#         size[-1], size[-2] = -1, -1
+           
+#         xs = xs.expand(size).contiguous()
+#         ys = ys.expand(size).contiguous()
+#         zs = zs.expand(size).contiguous()
+
+#         I_x = torch.searchsorted(self.x[...,1:-1,:,:].contiguous(), xs.contiguous()).repeat(size_x)
+#         I_y = torch.searchsorted(self.y[...,:,1:-1,:].contiguous(), ys.contiguous()).repeat(size_y)
+#         I_z = torch.searchsorted(self.z[...,:,:,1:-1].contiguous(), zs.contiguous()).repeat(size_z)
+
+#         x  = torch.gather(self.x, -1, I_x)
+#         dx = torch.gather(self.x, -1, I_x+1) - x
+        
+#         y  = torch.gather(self.y, -1, I_y)
+#         dy = torch.gather(self.y, -1, I_y+1) - y
+        
+#         z  = torch.gather(self.z, -1, I_z)
+#         dz = torch.gather(self.z, -1, I_z+1) - z
+
+#         u = (xs - x) / dx
+#         v = (ys - y) / dy
+#         w = (zs - z) / dz
+
+#         h = torch.stack([self.h_poly(1 + 2*u) * (1 - u)**2, 
+#                          self.h_poly(u) * dx * (1 - u), 
+#                          self.h_poly(1 + 2*u - 2*v) * (1 - u)**2, 
+#                          self.h_poly(u - v) * dx * (1 - u)], dim=-3)
+
+#         I_y = I_y.unsqueeze(-1).unsqueeze(-1).repeat(1, 1, self.m_y.shape[-1])
+#         I_x = I_x.unsqueeze(-1).unsqueeze(-1).repeat(1, 1, self.m_x.shape[-2], 1)
+           
+#         m = torch.stack([torch.gather(self.m_y, -2, I_y), 
+#                          torch.gather(self.m_y, -2, I_y+1), 
+#                          torch.gather(self.m_x, -1, I_x), 
+#                          torch.gather(self.m_x, -1, I_x+1)], dim=-3)
+
+#         return torch.einsum('ijklmn,ijkln->ijkmn', h, m).squeeze(-3)
     
 class CubicHermite3d(nn.Module):
     '''
